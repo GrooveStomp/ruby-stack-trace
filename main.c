@@ -243,22 +243,22 @@ main(int num_args, char **args)
         char *pid_string = args[1];
 
         uintptr_t base_address = ruby_base_address(pid_string);
-        printf("Ruby base address: hex(%lX) dec(%lu)\n", base_address, base_address);
+        printf("%-30s hex: %012lX dec: %015lu\n", "Base address", base_address, base_address);
 
         uintptr_t relative_address = ruby_relative_address(pid_string);
-        printf("Ruby relative address: hex(%lX) dec(%lu)\n", relative_address, relative_address);
+        printf("%-30s hex: %012lX dec: %015lu\n", "Relative address", relative_address, relative_address);
 
         uintptr_t ruby_proc_address = base_address + relative_address;
-        printf("Ruby process address: hex(%lX) dec(%lu)\n", ruby_proc_address, ruby_proc_address);
+        printf("%-30s hex: %012lX dec: %015lu\n", "Process address", ruby_proc_address, ruby_proc_address);
 
         pid_t pid = (pid_t)strtol(pid_string, NULL, 10);
-        printf("pid: %i\n", pid);
+        printf("%-30s %i\n", "Pid", pid);
 
         void *ruby_current_thread_address = read_remote_address(pid, (void *)ruby_proc_address);
-        printf("Ruby current thread address: hex(%lX) dec(%lu)\n", (uintptr_t)ruby_current_thread_address, (uintptr_t)ruby_current_thread_address);
+        printf("%-30s hex: %012lX dec: %015lu\n", "Current thread address", (uintptr_t)ruby_current_thread_address, (uintptr_t)ruby_current_thread_address);
 
         void *thread = read_remote_address(pid, ruby_current_thread_address);
-        printf("Ruby thread address: hex(%lX) dec(%lu)\n", (uintptr_t)thread, (uintptr_t)thread);
+        printf("%-30s hex: %012lX dec: %015lu\n", "Thread address", (uintptr_t)thread, (uintptr_t)thread);
 
         return(EXIT_SUCCESS);
 }
