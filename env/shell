@@ -22,7 +22,7 @@ function build() {
     executable="${executable%.*}"
     echo "$executable" > env/executable-name
 
-    gcc -std=c99 -pedantic-errors -fextended-identifiers -g -x c -o "env/build/$executable" "$cfile"
+    gcc -std=c99 -pedantic-errors -fextended-identifiers -g -x c -o "env/build/$executable" "$cfile" -ldwarf -lelf
 }
 
 function run() {

@@ -11,6 +11,12 @@
 #include <stdint.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/types.h> /* For open() */
+#include <sys/stat.h>  /* For open() */
+#include <fcntl.h>     /* For open() */
+
+#include "dwarf.h"
+#include "libdwarf.h"
 
 void
 abort_with_message(char *format_string, ...)
@@ -259,6 +265,28 @@ main(int num_args, char **args)
 
         void *thread = read_remote_address(pid, ruby_current_thread_address);
         printf("%-30s hex: %012lX dec: %015lu\n", "Thread address", (uintptr_t)thread, (uintptr_t)thread);
+
+        /**********************************************************************
+         * DWARF stuff
+         **********************************************************************/
+
+        char *proc_exe_path = "/proc/%s/exe";
+        int alloc_size = strlen(proc_exe_path) + strnlen(pid_string, 64);
+        char *filename = (char *)alloca(alloc_size);
+        snprintf(filename, alloc_size, proc_exe_path, pid_string);
+
+        int file_descriptor = open(filename, O_RDONLY);
+
+        Dwarf_Debug dwarf_debug;
+        Dwarf_Error *dwarf_error;
+        int res = dwarf_init(file_descriptor, DW_DLC_READ, NULL, (Dwarf_Ptr)1,
+                             &dwarf_debug, dwarf_error);
+        if(res != DW_DLV_OK) abort_with_message("Failed to initialize libdwarf\n");
+
+        res = dwarf_finish(dwarf_debug, dwarf_error);
+        if(res != DW_DLV_OK) abort_with_message("Failed to shutdown libdwarf\n");
+
+        close(file_descriptor);
 
         return(EXIT_SUCCESS);
 }
