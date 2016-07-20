@@ -1,0 +1,26 @@
+--------------------------------------------------------------------------------
+ Overview
+--------------------------------------------------------------------------------
+Julia Evan's wrote a program to get debugging information from a running Ruby
+process. The brief explanation of that is here:
+
+    http://jvns.ca/blog/2016/06/12/a-weird-system-call-process-vm-readv/
+
+Her prototype program in Rust is here:
+
+    https://github.com/jvns/ruby-stacktrace
+
+This is a reimplementation of that program in plain old C99.  I am also planning
+on using libdwarf to read debugging information instead of hardcoding machine-
+specific data like Julia's prototype.
+
+--------------------------------------------------------------------------------
+ Usage
+--------------------------------------------------------------------------------
+
+> cd /path/to/repository
+> source env/shell
+> build main.c
+> ruby &
+> export ruby_pid=$!
+> run $ruby_pid
