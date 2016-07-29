@@ -18,6 +18,8 @@
 #include "dwarf.h"
 #include "libdwarf.h"
 
+const unsigned int STRING_ALLOC_SIZE = 512;
+
 void
 abort_with_message(char *format_string, ...)
 {
@@ -57,7 +59,8 @@ read_hexadecimal_address(char *string, char terminal)
 }
 
 /*
-  You can't use fseek on a file in the proc file tree, so brute force it.
+  You can't use fseek on a file in the proc file tree, so brute force it by
+  counting all bytes until EOF.
 */
 size_t
 proc_file_size(char *filename)
@@ -86,8 +89,6 @@ copy_file_into_memory(char *file_name, size_t file_size, char *file_buffer)
 
         fclose(file);
 }
-
-const unsigned int STRING_ALLOC_SIZE = 512;
 
 /*
   This looks in /proc/{id}/maps to find the base address for the process.
@@ -135,7 +136,13 @@ execute_nm_child_process(int pipe_read, int pipe_write, char *pid)
         char *filename = (char *)alloca(alloc_size);
         snprintf(filename, alloc_size, proc_exe_path, pid);
 
+        /* execl replaces the current process with the named process. */
         execl("/usr/bin/nm", "nm", filename, (char *)NULL);
+
+        /*
+          if execl fails, then the current process continues and we'll hit the
+          abort message.
+        */
         abort_with_message("Failed to execute process `nm'\n");
 }
 
@@ -231,6 +238,16 @@ usage()
         exit(EXIT_SUCCESS);
 }
 
+struct srcfilesdata
+{
+    char **srcfiles;
+    Dwarf_Signed srcfilescount;
+    int srcfilesres;
+};
+static int unittype      = DW_UT_compile;
+static Dwarf_Bool g_is_info = 1;
+static void get_die_and_siblings(Dwarf_Debug, Dwarf_Die, int, int, struct srcfilesdata *);
+
 /* TODO(AARON): libdwarf:
    https://sourceforge.net/p/libdwarf/code/ci/master/tree/
 */
@@ -247,6 +264,25 @@ main(int num_args, char **args)
         }
         if(num_args != 2) usage();
         char *pid_string = args[1];
+
+        /*
+          1. Get the base memory address for the running ruby process (/proc/pid/maps | grep bin/ruby)
+          2. Get the relative offset used by the process itself. (nm /proc/pid/exe | grep current_ruby_thread)
+          3. Add these together to get the effective address.
+          4. process_vm_readv to read data at the effective address to get the memory pointer.
+          5. process_vm_readv to read the rb_thread_struct memory (DW_AT_byte_size) from memory pointer.
+          6. Read the cfp member from the rb_thread_struct.
+             (rb_thread_struct memory + DW_AT_data_member_location where
+              DW_AT_name == "cfp")
+          7. Repeat above for DW_TAG_typedef:DW_AT_name(rb_control_frame_t)
+             ie.: DW_TAG_structure_type:DW_AT_name(rb_control_frame_struct)
+             Julia does this bit:
+
+                 unsafe {
+                         let result = copy_address_raw(thread.cfp as *mut c_void, 100 * mem::size_of::<ruby_vm::rb_control_frame_t>(), pid);
+                         slice::from_raw_parts(result.as_ptr() as *const ruby_vm::rb_control_frame_t, 100)
+                 }
+        */
 
         uintptr_t base_address = ruby_base_address(pid_string);
         printf("%-30s hex: %012lX dec: %015lu\n", "Base address", base_address, base_address);
@@ -283,10 +319,130 @@ main(int num_args, char **args)
                              &dwarf_debug, dwarf_error);
         if(res != DW_DLV_OK) abort_with_message("Failed to initialize libdwarf\n");
 
+        {
+                Dwarf_Unsigned cu_header_length = 0;
+                Dwarf_Half     version_stamp = 0;
+                Dwarf_Unsigned abbrev_offset = 0;
+                Dwarf_Half     address_size = 0;
+                Dwarf_Half     offset_size = 0;
+                Dwarf_Half     extension_size = 0;
+                Dwarf_Sig8     signature;
+                Dwarf_Unsigned typeoffset = 0;
+                Dwarf_Unsigned next_cu_header = 0;
+                Dwarf_Half     header_cu_type = unittype;
+                Dwarf_Bool     is_info = g_is_info;
+                Dwarf_Error error;
+                int cu_number = 0;
+
+                /*
+                  - Find DW_TAG_structure_type "rb_thread_struct"
+                    - All members are subsequent "DW_TAG_member"s.
+                    - Get the DW_AT_name, DW_AT_type
+
+                  In Julia's code she predefines all the Ruby VM types and then
+                  reads the corresponding chunk of memory to fill that.
+                  Instead of doing that, we want to read the corresponding
+                  memory and then dynamically access it according to the debug
+                  info given by DWARF.
+
+                  DW_TAG_structure_type
+                    DW_AT_name rb_thread_struct
+                    DW_AT_byte_size 0x000003f0
+
+                  I believe this means read 0x3f0 bytes from memory.
+                  Search through DW_TAG_member sub-items and find the one with
+                  DW_AT_name == "cfp" and get DW_AT_data_member_location.
+                  Now our pointer is at Memory + DW_AT_data_member_location.
+
+                  TODO: DW_AT_type -> Need to find out size of data to read and type.
+                  TODO: Need to find out where rb_thread_struct is in memory dump.
+                 */
+
+                while(1)
+                {
+                        Dwarf_Die no_die = 0;
+                        Dwarf_Die cu_die = 0;
+                        int res = DW_DLV_ERROR;
+                        struct srcfilesdata sf;
+                        sf.srcfilesres = DW_DLV_ERROR;
+                        sf.srcfiles = 0;
+                        sf.srcfilescount = 0;
+                        memset(&signature,0, sizeof(signature));
+
+                        res = dwarf_next_cu_header_d(
+                                dwarf_debug, is_info, &cu_header_length, &version_stamp,
+                                &abbrev_offset, &address_size, &offset_size,
+                                &extension_size, &signature, &typeoffset,
+                                &next_cu_header, &header_cu_type, &error
+                        );
+                        if(DW_DLV_NO_ENTRY == res) break;
+                        if(DW_DLV_ERROR == res) abort_with_message(dwarf_errmsg(error));
+
+                        /* The CU will have a single sibling, a cu_die. */
+                        res = dwarf_siblingof_b(dwarf_debug, no_die,is_info, &cu_die, &error);
+                        if(DW_DLV_ERROR == res) abort_with_message(dwarf_errmsg(error));
+                        if(DW_DLV_NO_ENTRY == res) abort_with_message("This should never occur!\n");
+
+                        get_die_and_siblings(dwarf_debug,cu_die,is_info,0,&sf);
+                        dwarf_dealloc(dwarf_debug,cu_die,DW_DLA_DIE);
+
+                        for(Dwarf_Signed sri = 0; sri < sf.srcfilescount; ++sri)
+                        {
+                                dwarf_dealloc(dwarf_debug, sf.srcfiles[sri], DW_DLA_STRING);
+                        }
+                        dwarf_dealloc(dwarf_debug, sf.srcfiles, DW_DLA_LIST);
+                        sf.srcfilesres = DW_DLV_ERROR;
+                        sf.srcfiles = 0;
+                        sf.srcfilescount = 0;
+
+                        ++cu_number;
+                }
+        }
+
         res = dwarf_finish(dwarf_debug, dwarf_error);
         if(res != DW_DLV_OK) abort_with_message("Failed to shutdown libdwarf\n");
 
         close(file_descriptor);
 
         return(EXIT_SUCCESS);
+}
+
+
+static void
+get_die_and_siblings(Dwarf_Debug dwarf_debug, Dwarf_Die in_die, int is_info,int in_level, struct srcfilesdata *sf)
+{
+//        print_die_data(dwarf_debug,in_die,in_level,sf);
+
+        while(1)
+        {
+                int res = DW_DLV_ERROR;
+                Dwarf_Die cur_die=in_die;
+                Dwarf_Die child = 0;
+                Dwarf_Error error = 0;
+                Dwarf_Die sib_die = 0;
+
+                res = dwarf_child(cur_die, &child, &error);
+                if(DW_DLV_ERROR == res)
+                        abort_with_message("Error in dwarf_child, level %d\n", in_level);
+
+                if(DW_DLV_OK == res)
+                        get_die_and_siblings(dwarf_debug, child, is_info, in_level + 1, sf);
+
+                /* res == DW_DLV_NO_ENTRY */
+                res = dwarf_siblingof_b(dwarf_debug,cur_die,is_info,&sib_die, &error);
+                if(res == DW_DLV_NO_ENTRY)
+                        break;
+
+                if(res == DW_DLV_ERROR)
+                        abort_with_message(dwarf_errmsg(error));
+
+                /* res == DW_DLV_OK */
+                if(cur_die != in_die)
+                        dwarf_dealloc(dwarf_debug,cur_die,DW_DLA_DIE);
+
+                cur_die = sib_die;
+//                print_die_data(dwarf_debug,cur_die,in_level,sf);
+        }
+
+        return;
 }
