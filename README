@@ -1,7 +1,7 @@
 --------------------------------------------------------------------------------
  Overview
 --------------------------------------------------------------------------------
-Julia Evan's wrote a program to get debugging information from a running Ruby
+Julia Evans wrote a program to get debugging information from a running Ruby
 process. The brief explanation of that is here:
 
     http://jvns.ca/blog/2016/06/12/a-weird-system-call-process-vm-readv/
